@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Beat Mixer — Beginner Studio</title>
+  <meta name="description" content="Browser-based music mixer — load samples, apply EQ/reverb/compression, and export your mix as WAV." />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2300d4ff20'/><rect x='4' y='18' width='4' height='10' rx='1.5' fill='%2300d4ff'/><rect x='10' y='12' width='4' height='16' rx='1.5' fill='%2300d4ffcc'/><rect x='16' y='7' width='4' height='21' rx='1.5' fill='%2300d4ff'/><rect x='22' y='14' width='4' height='14' rx='1.5' fill='%2300d4ffcc'/></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: #0a0b12; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: #13151f; }
+    ::-webkit-scrollbar-thumb { background: #1e2235; border-radius: 3px; }
+
+    /* Range input global styling */
+    input[type="range"] {
+      -webkit-appearance: none; appearance: none;
+      height: 4px; border-radius: 2px; background: #1e2235;
+      outline: none; cursor: pointer; display: block;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 13px; height: 13px;
+      border-radius: 50%; background: #00d4ff; cursor: pointer;
+      box-shadow: 0 0 5px rgba(0,212,255,0.5); transition: transform 0.1s;
+    }
+    input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.25); }
+    input[type="range"]::-moz-range-thumb {
+      width: 13px; height: 13px; border-radius: 50%;
+      background: #00d4ff; cursor: pointer; border: none;
+    }
+
+    /* Button hover */
+    button:hover:not(:disabled) { opacity: 0.88; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Keyframes */
+    @keyframes pulse {
+      0%, 100% { opacity: 0.4; transform: scale(1); }
+      50% { opacity: 1; transform: scale(1.3); }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <!-- React 18 + ReactDOM from CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script>
+// Beat Mixer — Full Application
+// All audio processing via Web Audio API, all UI via React (CDN)
+// Freesound API calls go directly from the browser to freesound.org/apiv2
+// (Token auth supports CORS on that endpoint)
+
+const { useState, useEffect, useRef, useCallback, createElement: h } = React;
+
+// ─── AUDIO ENGINE ──────────────────────────────────────────────────────────
+function buildReverbIR(ctx, duration = 2, decay = 2) {
+  const rate = ctx.sampleRate;
+  const length = Math.floor(rate * duration);
+  const buf = ctx.createBuffer(2, length, rate);
+  for (let c = 0; c < 2; c++) {
+    const ch = buf.getChannelData(c);
+    for (let i = 0; i < length; i++) {
+      ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decay);
+    }
+  }
+  return buf;
+}
+
+function buildKickBuffer(ctx) {
+  const dur = 0.5; const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate);
+  const ch = buf.getChannelData(0); const sr = ctx.sampleRate;
+  for (let i = 0; i < ch.length; i++) {
+    const t = i / sr; const freq = 150 * Math.exp(-t * 30); const amp = Math.exp(-t * 10);
+    ch[i] = Math.sin(2 * Math.PI * freq * t) * amp;
+  }
+  return buf;
+}
+
+function buildSnareBuffer(ctx) {
+  const dur = 0.3; const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate);
+  const ch = buf.getChannelData(0); const sr = ctx.sampleRate;
+  for (let i = 0; i < ch.length; i++) {
+    const t = i / sr; const noise = (Math.random() * 2 - 1); const tone = Math.sin(2 * Math.PI * 200 * t);
+    ch[i] = (noise * 0.7 + tone * 0.3) * Math.exp(-t * 15);
+  }
+  return buf;
+}
+
+function buildHiHatBuffer(ctx, open = false) {
+  const dur = open ? 0.4 : 0.1; const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate);
+  const ch = buf.getChannelData(0); const sr = ctx.sampleRate;
+  for (let i = 0; i < ch.length; i++) {
+    const t = i / sr;
+    ch[i] = (Math.random() * 2 - 1) * Math.exp(-t * (open ? 8 : 40)) * 0.6;
+  }
+  return buf;
+}
+
+function buildClapBuffer(ctx) {
+  const dur = 0.2; const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate);
+  const ch = buf.getChannelData(0); const sr = ctx.sampleRate;
+  for (let i = 0; i < ch.length; i++) {
+    const t = i / sr;
+    const burst = (t < 0.015 ? 1 : t < 0.030 ? 0.7 : t < 0.045 ? 0.5 : 0);
+    const amp = Math.exp(-t * 25) + burst * 0.5;
+    ch[i] = (Math.random() * 2 - 1) * Math.min(amp, 1);
+  }
+  return buf;
+}
+
+function buildBassBuffer(ctx) {
+  const dur = 0.8; const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate);
+  const ch = buf.getChannelData(0); const sr = ctx.sampleRate;
+  const freq = 55;
+  for (let i = 0; i < ch.length; i++) {
+    const t = i / sr; const amp = Math.exp(-t * 5) * 0.7;
+    const phase = (2 * Math.PI * freq * t) % (2 * Math.PI);
+    const triangle = (2 / Math.PI) * Math.asin(Math.sin(phase));
+    ch[i] = (triangle * 0.6 + Math.sin(phase) * 0.4) * amp;
+  }
+  return buf;
+}
+
+class AudioEngine {
+  constructor() {
+    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    this.masterGain = this.ctx.createGain(); this.masterGain.gain.value = 0.85;
+    this.masterAnalyser = this.ctx.createAnalyser(); this.masterAnalyser.fftSize = 256;
+    this.reverbConvolver = this.ctx.createConvolver();
+    this.reverbConvolver.buffer = buildReverbIR(this.ctx, 2.5, 2);
+    this.trackNodes = new Map(); this.trackSources = new Map(); this.trackBuffers = new Map();
+    this.masterGain.connect(this.masterAnalyser); this.masterAnalyser.connect(this.ctx.destination);
+  }
+
+  createTrackNodes(id) {
+    const c = this.ctx;
+    const gainNode = c.createGain(); gainNode.gain.value = 0.8;
+    const pannerNode = c.createStereoPanner(); pannerNode.pan.value = 0;
+    const lowShelf = c.createBiquadFilter(); lowShelf.type = 'lowshelf'; lowShelf.frequency.value = 200;
+    const midPeak = c.createBiquadFilter(); midPeak.type = 'peaking'; midPeak.frequency.value = 1000; midPeak.Q.value = 1;
+    const highShelf = c.createBiquadFilter(); highShelf.type = 'highshelf'; highShelf.frequency.value = 6000;
+    const compressor = c.createDynamicsCompressor();
+    compressor.threshold.value = -24; compressor.ratio.value = 4; compressor.attack.value = 0.003; compressor.release.value = 0.25;
+    const dryGain = c.createGain(); dryGain.gain.value = 1;
+    const reverbSend = c.createGain(); reverbSend.gain.value = 0;
+    const reverbReturn = c.createGain(); reverbReturn.gain.value = 0.8;
+    const analyser = c.createAnalyser(); analyser.fftSize = 128;
+
+    gainNode.connect(pannerNode); pannerNode.connect(lowShelf); lowShelf.connect(midPeak); midPeak.connect(highShelf);
+    highShelf.connect(compressor); compressor.connect(dryGain); compressor.connect(reverbSend);
+    dryGain.connect(analyser); reverbSend.connect(this.reverbConvolver);
+    this.reverbConvolver.connect(reverbReturn); reverbReturn.connect(analyser);
+    analyser.connect(this.masterGain);
+
+    const nodes = { gainNode, pannerNode, lowShelf, midPeak, highShelf, compressor, dryGain, reverbSend, reverbReturn, analyser };
+    this.trackNodes.set(id, nodes); return nodes;
+  }
+
+  removeTrackNodes(id) {
+    const n = this.trackNodes.get(id);
+    if (!n) return;
+    try { n.gainNode.disconnect(); n.pannerNode.disconnect(); n.analyser.disconnect(); } catch(e) {}
+    this.trackNodes.delete(id); this.trackSources.delete(id); this.trackBuffers.delete(id);
+  }
+
+  setBuffer(id, buf) { this.trackBuffers.set(id, buf); }
+  getBuffer(id) { return this.trackBuffers.get(id) || null; }
+
+  applyFX(id, fx) {
+    const n = this.trackNodes.get(id); if (!n) return;
+    n.lowShelf.gain.value = fx.eqLow; n.midPeak.gain.value = fx.eqMid; n.highShelf.gain.value = fx.eqHigh;
+    n.compressor.threshold.value = fx.compEnabled ? fx.compThreshold : 0;
+    n.compressor.ratio.value = fx.compEnabled ? fx.compRatio : 1;
+    n.dryGain.gain.value = 1 - fx.reverbWet * 0.5; n.reverbSend.gain.value = fx.reverbWet;
+  }
+
+  setVolume(id, v) {
+    const n = this.trackNodes.get(id);
+    if (n) n.gainNode.gain.linearRampToValueAtTime(v, this.ctx.currentTime + 0.02);
+  }
+
+  setPan(id, p) { const n = this.trackNodes.get(id); if (n) n.pannerNode.pan.setValueAtTime(p, this.ctx.currentTime); }
+  setMasterVolume(v) { this.masterGain.gain.linearRampToValueAtTime(v, this.ctx.currentTime + 0.02); }
+
+  getTrackLevel(id) {
+    const n = this.trackNodes.get(id); if (!n) return 0;
+    const buf = new Uint8Array(n.analyser.frequencyBinCount); n.analyser.getByteTimeDomainData(buf);
+    let peak = 0;
+    for (let i = 0; i < buf.length; i++) { const v = Math.abs(buf[i] - 128) / 128; if (v > peak) peak = v; }
+    return peak;
+  }
+
+  getMasterLevel() {
+    const buf = new Uint8Array(this.masterAnalyser.frequencyBinCount); this.masterAnalyser.getByteTimeDomainData(buf);
+    let peak = 0;
+    for (let i = 0; i < buf.length; i++) { const v = Math.abs(buf[i] - 128) / 128; if (v > peak) peak = v; }
+    return peak;
+  }
+
+  playAll(muted, loopMap) {
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    this.stopAll();
+    this.trackBuffers.forEach((buffer, id) => {
+      if (muted.has(id)) return;
+      const nodes = this.trackNodes.get(id); if (!nodes) return;
+      const src = this.ctx.createBufferSource();
+      src.buffer = buffer; src.loop = loopMap.get(id) !== false; src.connect(nodes.gainNode); src.start(0);
+      this.trackSources.set(id, src);
+    });
+  }
+
+  stopAll() {
+    this.trackSources.forEach(src => { try { src.stop(); } catch(e) {} });
+    this.trackSources.clear();
+  }
+
+  isPlaying() { return this.trackSources.size > 0; }
+
+  async exportWAV(trackIds, muteSet, fxMap, volMap, panMap) {
+    const maxDur = Math.max(...trackIds.map(id => { const b = this.trackBuffers.get(id); return b ? b.duration : 0; }), 4);
+    const duration = Math.min(maxDur * 2, 60);
+    const RATE = this.ctx.sampleRate;
+    const offCtx = new OfflineAudioContext(2, Math.ceil(RATE * duration), RATE);
+    const offReverb = offCtx.createConvolver(); offReverb.buffer = buildReverbIR(offCtx, 2.5, 2);
+    const offMaster = offCtx.createGain(); offMaster.gain.value = this.masterGain.gain.value; offMaster.connect(offCtx.destination);
+
+    for (const id of trackIds) {
+      if (muteSet.has(id)) continue;
+      const buf = this.trackBuffers.get(id); if (!buf) continue;
+      const g = offCtx.createGain(); g.gain.value = volMap.get(id) ?? 0.8;
+      const p = offCtx.createStereoPanner(); p.pan.value = panMap.get(id) ?? 0;
+      const low = offCtx.createBiquadFilter(); low.type = 'lowshelf'; low.frequency.value = 200;
+      const mid = offCtx.createBiquadFilter(); mid.type = 'peaking'; mid.frequency.value = 1000; mid.Q.value = 1;
+      const high = offCtx.createBiquadFilter(); high.type = 'highshelf'; high.frequency.value = 6000;
+      const comp = offCtx.createDynamicsCompressor();
+      const dry = offCtx.createGain(); const send = offCtx.createGain(); const ret = offCtx.createGain(); ret.gain.value = 0.8;
+      const fx = fxMap.get(id);
+      if (fx) {
+        low.gain.value = fx.eqLow; mid.gain.value = fx.eqMid; high.gain.value = fx.eqHigh;
+        comp.threshold.value = fx.compEnabled ? fx.compThreshold : 0; comp.ratio.value = fx.compEnabled ? fx.compRatio : 1;
+        dry.gain.value = 1 - fx.reverbWet * 0.5; send.gain.value = fx.reverbWet;
+      } else { dry.gain.value = 1; send.gain.value = 0; }
+      g.connect(p); p.connect(low); low.connect(mid); mid.connect(high); high.connect(comp); comp.connect(dry); comp.connect(send);
+      send.connect(offReverb); offReverb.connect(ret); dry.connect(offMaster); ret.connect(offMaster);
+      const src = offCtx.createBufferSource(); src.buffer = buf; src.loop = true; src.connect(g); src.start(0);
+    }
+
+    const rendered = await offCtx.startRendering();
+    return encodeWAV(rendered);
+  }
+
+  async resume() { if (this.ctx.state === 'suspended') await this.ctx.resume(); }
+}
+
+function encodeWAV(buf) {
+  const numCh = buf.numberOfChannels; const sr = buf.sampleRate; const numSamples = buf.length;
+  const blockAlign = numCh * 2; const byteRate = sr * blockAlign; const dataSize = numSamples * blockAlign;
+  const ab = new ArrayBuffer(44 + dataSize); const dv = new DataView(ab);
+  const ws = (off, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); };
+  ws(0, 'RIFF'); dv.setUint32(4, 36 + dataSize, true); ws(8, 'WAVE'); ws(12, 'fmt ');
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, numCh, true);
+  dv.setUint32(24, sr, true); dv.setUint32(28, byteRate, true); dv.setUint16(32, blockAlign, true);
+  dv.setUint16(34, 16, true); ws(36, 'data'); dv.setUint32(40, dataSize, true);
+  let offset = 44;
+  for (let i = 0; i < numSamples; i++) {
+    for (let c = 0; c < numCh; c++) {
+      const s = Math.max(-1, Math.min(1, buf.getChannelData(c)[i]));
+      dv.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true); offset += 2;
+    }
+  }
+  return new Blob([ab], { type: 'audio/wav' });
+}
+
+// ─── FREESOUND API (direct, no proxy needed - they support CORS) ────────────
+async function searchFreesound(query, token, page = 1) {
+  const params = new URLSearchParams({ query, token, page: String(page), page_size: '8',
+    fields: 'id,name,previews,duration,username,tags,license' });
+  const r = await fetch(`https://freesound.org/apiv2/search/text/?${params}`);
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
+  return r.json();
+}
+
+async function fetchFreesoundPreview(url, ctx) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('Failed to fetch audio preview');
+  const ab = await r.arrayBuffer();
+  return ctx.decodeAudioData(ab);
+}
+
+// ─── UI HELPERS ────────────────────────────────────────────────────────────
+const COLORS = [
+  { name: 'cyan',   dot: '#00d4ff', bg: 'rgba(0,212,255,0.07)',   border: 'rgba(0,212,255,0.25)' },
+  { name: 'orange', dot: '#ff6b35', bg: 'rgba(255,107,53,0.07)',  border: 'rgba(255,107,53,0.25)' },
+  { name: 'purple', dot: '#b06fe6', bg: 'rgba(176,111,230,0.07)', border: 'rgba(176,111,230,0.25)' },
+  { name: 'green',  dot: '#3ed978', bg: 'rgba(62,217,120,0.07)',  border: 'rgba(62,217,120,0.25)' },
+  { name: 'pink',   dot: '#f04568', bg: 'rgba(240,69,104,0.07)',  border: 'rgba(240,69,104,0.25)' },
+  { name: 'yellow', dot: '#f5c842', bg: 'rgba(245,200,66,0.07)',  border: 'rgba(245,200,66,0.25)' },
+];
+let trackCounter = 0;
+const makeId = () => `t${++trackCounter}`;
+const DEFAULT_FX = { eqLow: 0, eqMid: 0, eqHigh: 0, compEnabled: false, compThreshold: -24, compRatio: 4, reverbWet: 0 };
+
+function buildWaveform(buf) {
+  const ch = buf.getChannelData(0); const buckets = 150; const step = Math.floor(ch.length / buckets);
+  const out = [];
+  for (let i = 0; i < buckets; i++) {
+    let max = 0;
+    for (let j = 0; j < step; j++) { const v = Math.abs(ch[i * step + j] || 0); if (v > max) max = v; }
+    out.push(max);
+  }
+  return out;
+}
+
+// ─── COMPONENTS ────────────────────────────────────────────────────────────
+function VUMeter({ level, color }) {
+  const pct = Math.min(100, level * 300);
+  const bc = pct > 80 ? '#ff6b35' : pct > 55 ? '#f5c842' : color;
+  return h('div', { style: { height: 6, borderRadius: 3, background: '#1a1d2e', overflow: 'hidden' } },
+    h('div', { style: { width: `${pct}%`, height: '100%', background: bc, borderRadius: 3, transition: 'width 0.05s' } }));
+}
+
+function WaveformCanvas({ data, color, playing }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const c = ref.current; if (!c) return;
+    const ctx = c.getContext('2d'); const W = c.width; const H = c.height;
+    ctx.clearRect(0, 0, W, H);
+    if (!data || !data.length) {
+      ctx.strokeStyle = '#2a2d3e'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(0, H/2); ctx.lineTo(W, H/2); ctx.stroke(); return;
+    }
+    const step = data.length / W; ctx.strokeStyle = playing ? color : color + '80'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let x = 0; x < W; x++) { const amp = data[Math.min(Math.floor(x*step), data.length-1)]; const y = H/2 - amp*(H*0.45); x===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y); }
+    for (let x = W-1; x >= 0; x--) { const amp = data[Math.min(Math.floor(x*step), data.length-1)]; ctx.lineTo(x, H/2+amp*(H*0.45)); }
+    ctx.closePath(); ctx.fillStyle = playing ? color+'28' : color+'12'; ctx.fill(); ctx.stroke();
+  }, [data, color, playing]);
+  return h('canvas', { ref, width: 300, height: 44, style: { width: '100%', borderRadius: 4, display: 'block' } });
+}
+
+function TrackLane({ track, playing, level, onVol, onPan, onMute, onFX, onFXToggle, onRemove }) {
+  const c = COLORS[track.colorIdx] || COLORS[0];
+  return h('div', { style: { borderRadius: 12, border: `1px solid ${playing && !track.muted ? c.border : '#1e2235'}`, overflow: 'hidden', marginBottom: 10 } },
+    // Header
+    h('div', { style: { background: c.bg, borderBottom: `1px solid ${c.dot}22`, padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8 } },
+      h('div', { style: { width: 8, height: 8, borderRadius: '50%', background: c.dot, flexShrink: 0 } }),
+      h('span', { style: { color: c.dot, fontSize: 11, fontWeight: 600, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, track.name),
+      track.duration > 0 && h('span', { style: { fontSize: 9, color: '#4a5080' } }, `${track.duration.toFixed(1)}s`),
+      h('button', { onClick: () => onMute(track.id), title: track.muted ? 'Unmute' : 'Mute',
+        style: { background: 'none', border: 'none', cursor: 'pointer', color: track.muted ? '#ff6b35' : '#4a5080', fontSize: 13, padding: '0 2px' } },
+        track.muted ? '🔇' : '🔊'),
+      h('button', { onClick: () => onFXToggle(track.id),
+        style: { background: track.showFx ? `${c.dot}22` : 'none', border: `1px solid ${track.showFx ? c.dot : '#2a2d3e'}`, borderRadius: 4, cursor: 'pointer',
+          color: track.showFx ? c.dot : '#4a5080', fontSize: 9, padding: '2px 6px' } }, 'FX'),
+      h('button', { onClick: () => onRemove(track.id), title: 'Remove',
+        style: { background: 'none', border: 'none', cursor: 'pointer', color: '#3a3f55', fontSize: 12, padding: '0 2px' } }, '✕'),
+    ),
+    // Body
+    h('div', { style: { background: '#0d0f18', padding: '10px 12px' } },
+      h(WaveformCanvas, { data: track.waveform, color: c.dot, playing: playing && !track.muted }),
+      h('div', { style: { marginTop: 6 } }, h(VUMeter, { level: track.muted ? 0 : level, color: c.dot })),
+      h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 8 } },
+        // Volume
+        h('div', null,
+          h('label', { style: labelStyle }, 'Volume'),
+          h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: track.volume, style: sliderStyle,
+            onChange: e => onVol(track.id, parseFloat(e.target.value)) })),
+        // Pan
+        h('div', null,
+          h('label', { style: labelStyle }, `Pan ${track.pan === 0 ? 'C' : track.pan < 0 ? 'L'+Math.abs(Math.round(track.pan*100)) : 'R'+Math.round(track.pan*100)}`),
+          h('input', { type: 'range', min: -1, max: 1, step: 0.01, value: track.pan, style: sliderStyle,
+            onChange: e => onPan(track.id, parseFloat(e.target.value)) })),
+      ),
+      // FX Panel
+      track.showFx && h('div', { style: { marginTop: 10, background: `${c.dot}08`, border: `1px solid ${c.dot}30`, borderRadius: 8, padding: 10 } },
+        h('div', { style: { fontSize: 9, fontWeight: 700, color: c.dot, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 8 } }, '— Effects Rack —'),
+        // EQ
+        h('div', { style: { fontSize: 9, color: '#5a6080', fontWeight: 600, marginBottom: 4 } }, 'EQ (Bass / Mid / Treble)'),
+        [['eqLow','Bass'],['eqMid','Mid'],['eqHigh','Treble']].map(([key, label]) =>
+          h('div', { key, style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 } },
+            h('span', { style: { fontSize: 9, width: 36, color: '#4a5080' } }, label),
+            h('input', { type: 'range', min: -12, max: 12, step: 0.5, value: track.fx[key], style: { ...sliderStyle, flex: 1 },
+              onChange: e => onFX(track.id, key, parseFloat(e.target.value)) }),
+            h('span', { style: { fontSize: 9, color: '#5a6080', width: 28, textAlign: 'right' } }, `${track.fx[key] > 0 ? '+' : ''}${track.fx[key].toFixed(1)}`)
+          )
+        ),
+        // Reverb
+        h('div', { style: { marginTop: 6 } },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: 3 } },
+            h('span', { style: { fontSize: 9, color: '#5a6080', fontWeight: 600 } }, 'Reverb'),
+            h('span', { style: { fontSize: 9, color: '#4a5080' } }, `${Math.round(track.fx.reverbWet*100)}% wet`)),
+          h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: track.fx.reverbWet, style: sliderStyle,
+            onChange: e => onFX(track.id, 'reverbWet', parseFloat(e.target.value)) })),
+        // Compressor
+        h('div', { style: { marginTop: 6 } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 } },
+            h('span', { style: { fontSize: 9, color: '#5a6080', fontWeight: 600 } }, 'Compressor'),
+            h('button', {
+              onClick: () => onFX(track.id, 'compEnabled', !track.fx.compEnabled),
+              style: { fontSize: 9, padding: '2px 8px', borderRadius: 10, cursor: 'pointer',
+                border: `1px solid ${track.fx.compEnabled ? c.dot : '#2a2d3e'}`,
+                background: track.fx.compEnabled ? `${c.dot}22` : 'none',
+                color: track.fx.compEnabled ? c.dot : '#4a5080' }
+            }, track.fx.compEnabled ? 'ON' : 'OFF')),
+          track.fx.compEnabled && [
+            ['compThreshold','Threshold', -60, 0, 1, 'dB'],
+            ['compRatio','Ratio', 1, 20, 0.5, ':1']
+          ].map(([key, lbl, mn, mx, st, unit]) =>
+            h('div', { key, style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 } },
+              h('span', { style: { fontSize: 9, width: 50, color: '#4a5080' } }, lbl),
+              h('input', { type: 'range', min: mn, max: mx, step: st, value: track.fx[key], style: { ...sliderStyle, flex: 1 },
+                onChange: e => onFX(track.id, key, parseFloat(e.target.value)) }),
+              h('span', { style: { fontSize: 9, color: '#5a6080', width: 32, textAlign: 'right' } }, `${parseFloat(track.fx[key]).toFixed(1)}${unit}`)
+            )
+          )
+        )
+      )
+    )
+  );
+}
+
+const labelStyle = { display: 'block', fontSize: 9, color: '#4a5080', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 2 };
+const sliderStyle = {
+  width: '100%', WebkitAppearance: 'none', appearance: 'none',
+  height: 4, borderRadius: 2, background: '#1e2235', outline: 'none', cursor: 'pointer',
+};
+
+// ─── FREESOUND BROWSER ─────────────────────────────────────────────────────
+function FreesoundBrowser({ apiKey, onKeyChange, onLoad, loading }) {
+  const [q, setQ] = useState('');
+  const [results, setResults] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+
+  const doSearch = async (pg = 1) => {
+    if (!apiKey) { setErr('Paste your Freesound API key above.'); return; }
+    if (!q) { setErr('Enter a search query.'); return; }
+    setBusy(true); setErr('');
+    try {
+      const r = await searchFreesound(q, apiKey, pg);
+      setResults(r.results); setTotal(r.count); setPage(pg);
+    } catch (e) { setErr(e.message || 'Search failed'); }
+    finally { setBusy(false); }
+  };
+
+  return h('div', null,
+    h('div', { style: { marginBottom: 8 } },
+      h('label', { style: labelStyle }, 'Freesound API Key'),
+      h('input', { type: 'password', value: apiKey, placeholder: 'from freesound.org/apiv2/apply',
+        onChange: e => onKeyChange(e.target.value),
+        style: { width: '100%', background: '#0d0f18', border: '1px solid #1e2235', borderRadius: 6, padding: '5px 8px', color: '#c0c8e0', fontSize: 11, boxSizing: 'border-box' } }),
+      h('p', { style: { fontSize: 9, color: '#3a3f55', marginTop: 3 } }, 'Free — register at freesound.org → My API credentials')
+    ),
+    h('div', { style: { display: 'flex', gap: 6, marginBottom: 6 } },
+      h('input', { value: q, placeholder: 'kick drum, piano loop…',
+        onChange: e => setQ(e.target.value), onKeyDown: e => e.key === 'Enter' && doSearch(),
+        style: { flex: 1, background: '#0d0f18', border: '1px solid #1e2235', borderRadius: 6, padding: '5px 8px', color: '#c0c8e0', fontSize: 11 } }),
+      h('button', { onClick: () => doSearch(), disabled: busy,
+        style: { background: '#00d4ff', color: '#0a0b0f', border: 'none', borderRadius: 6, padding: '5px 12px', cursor: 'pointer', fontSize: 11, fontWeight: 700 } },
+        busy ? '…' : 'Go')
+    ),
+    err && h('p', { style: { fontSize: 10, color: '#ff6b35', marginBottom: 6 } }, err),
+    results.length > 0 && h('div', { style: { maxHeight: 240, overflowY: 'auto' } },
+      results.map(s => h('div', { key: s.id,
+        style: { display: 'flex', alignItems: 'center', gap: 8, padding: '7px 8px', borderRadius: 7, border: '1px solid #1a1d2e', marginBottom: 4,
+          background: '#0d0f18', cursor: 'pointer' },
+        onMouseEnter: e => e.currentTarget.style.borderColor = '#00d4ff44',
+        onMouseLeave: e => e.currentTarget.style.borderColor = '#1a1d2e' },
+        h('div', { style: { flex: 1, minWidth: 0 } },
+          h('p', { style: { fontSize: 10, fontWeight: 600, color: '#c0c8e0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, s.name),
+          h('p', { style: { fontSize: 9, color: '#4a5080' } }, `${s.username} · ${s.duration.toFixed(1)}s`)),
+        h('button', { onClick: () => onLoad(s), disabled: !!loading,
+          style: { fontSize: 9, padding: '3px 8px', borderRadius: 5, cursor: 'pointer', background: '#00d4ff', color: '#0a0b0f', border: 'none', fontWeight: 700, opacity: loading ? 0.5 : 1 } },
+          loading === String(s.id) ? '…' : 'ADD')
+      )),
+      total > 8 && h('div', { style: { display: 'flex', justifyContent: 'space-between', marginTop: 6 } },
+        h('button', { onClick: () => doSearch(page-1), disabled: page<=1||busy,
+          style: { fontSize: 10, background: 'none', border: 'none', cursor: 'pointer', color: '#00d4ff', opacity: page<=1 ? 0.3 : 1 } }, '← Prev'),
+        h('span', { style: { fontSize: 9, color: '#4a5080' } }, `Pg ${page} · ${total} results`),
+        h('button', { onClick: () => doSearch(page+1), disabled: busy || page*8>=total,
+          style: { fontSize: 10, background: 'none', border: 'none', cursor: 'pointer', color: '#00d4ff', opacity: page*8>=total ? 0.3 : 1 } }, 'Next →'))
+    )
+  );
+}
+
+// ─── MAIN APP ──────────────────────────────────────────────────────────────
+function App() {
+  const [tracks, setTracks] = useState([]);
+  const [playing, setPlaying] = useState(false);
+  const [masterVol, setMasterVol] = useState(0.85);
+  const [levels, setLevels] = useState({});
+  const [masterLevel, setMasterLevel] = useState(0);
+  const [fsKey, setFsKey] = useState('');
+  const [loadingFs, setLoadingFs] = useState(null);
+  const [showBrowser, setShowBrowser] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [toast, setToast] = useState(null);
+  const [showInfo, setShowInfo] = useState(false);
+
+  const engineRef = useRef(null);
+  const frameRef = useRef(0);
+  const fileInputRef = useRef(null);
+
+  const showToast = (msg, type = 'info') => {
+    setToast({ msg, type }); setTimeout(() => setToast(null), 3000);
+  };
+
+  const ensureEngine = useCallback(() => {
+    if (!engineRef.current) engineRef.current = new AudioEngine();
+    return engineRef.current;
+  }, []);
+
+  // Level animation loop
+  useEffect(() => {
+    const tick = () => {
+      const eng = engineRef.current;
+      if (eng && playing) {
+        const newL = {};
+        tracks.forEach(t => { newL[t.id] = eng.getTrackLevel(t.id); });
+        setLevels(newL); setMasterLevel(eng.getMasterLevel());
+      }
+      frameRef.current = requestAnimationFrame(tick);
+    };
+    frameRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frameRef.current);
+  }, [playing, tracks]);
+
+  const addTrack = useCallback((name, buffer) => {
+    const eng = ensureEngine(); const id = makeId();
+    eng.createTrackNodes(id); eng.setBuffer(id, buffer);
+    eng.setVolume(id, 0.8); eng.applyFX(id, { ...DEFAULT_FX });
+    setTracks(prev => [...prev, {
+      id, name, colorIdx: prev.length % COLORS.length,
+      loaded: true, muted: false, volume: 0.8, pan: 0,
+      fx: { ...DEFAULT_FX }, duration: buffer.duration,
+      showFx: false, waveform: buildWaveform(buffer)
+    }]);
+  }, [ensureEngine]);
+
+  const loadDemos = useCallback(async () => {
+    const eng = ensureEngine(); await eng.resume();
+    [['Kick',buildKickBuffer(eng.ctx)], ['Snare',buildSnareBuffer(eng.ctx)],
+     ['Hi-Hat',buildHiHatBuffer(eng.ctx)], ['Clap',buildClapBuffer(eng.ctx)],
+     ['Bass',buildBassBuffer(eng.ctx)]
+    ].forEach(([name, buf], i) => { if (tracks.length + i < 6) addTrack(name, buf); });
+    showToast('5 demo samples loaded!');
+  }, [ensureEngine, addTrack, tracks.length]);
+
+  const handleFiles = useCallback(async files => {
+    if (!files?.length) return;
+    const eng = ensureEngine(); await eng.resume();
+    for (const f of Array.from(files)) {
+      if (tracks.length >= 6) { showToast('Max 6 tracks', 'error'); break; }
+      try {
+        const ab = await f.arrayBuffer();
+        const buf = await eng.ctx.decodeAudioData(ab);
+        addTrack(f.name.replace(/\.[^/.]+$/, '').slice(0, 22), buf);
+        showToast(`Loaded "${f.name.slice(0,20)}"`);
+      } catch { showToast(`Failed: ${f.name}`, 'error'); }
+    }
+  }, [ensureEngine, addTrack, tracks.length]);
+
+  const handleFsLoad = useCallback(async sound => {
+    if (tracks.length >= 6) { showToast('Max 6 tracks', 'error'); return; }
+    const eng = ensureEngine(); await eng.resume();
+    setLoadingFs(String(sound.id));
+    try {
+      const url = sound.previews['preview-hq-mp3'] || sound.previews['preview-lq-mp3'];
+      const buf = await fetchFreesoundPreview(url, eng.ctx);
+      addTrack(sound.name.slice(0, 22), buf);
+      showToast(`Added "${sound.name.slice(0,20)}"`);
+    } catch (e) { showToast(`Error: ${e.message}`, 'error'); }
+    finally { setLoadingFs(null); }
+  }, [ensureEngine, addTrack, tracks.length]);
+
+  const togglePlay = useCallback(async () => {
+    const eng = ensureEngine(); await eng.resume();
+    if (playing) { eng.stopAll(); setPlaying(false); setLevels({}); setMasterLevel(0); }
+    else {
+      if (!tracks.find(t => t.loaded)) { showToast('Load some samples first', 'error'); return; }
+      const muted = new Set(tracks.filter(t => t.muted).map(t => t.id));
+      eng.playAll(muted, new Map(tracks.map(t => [t.id, true])));
+      setPlaying(true);
+    }
+  }, [ensureEngine, playing, tracks]);
+
+  const handleVol = (id, v) => {
+    setTracks(p => p.map(t => t.id===id ? {...t, volume:v} : t));
+    engineRef.current?.setVolume(id, v);
+  };
+  const handlePan = (id, v) => {
+    setTracks(p => p.map(t => t.id===id ? {...t, pan:v} : t));
+    engineRef.current?.setPan(id, v);
+  };
+  const handleMute = (id) => {
+    setTracks(p => p.map(t => {
+      if (t.id !== id) return t;
+      const m = !t.muted; engineRef.current?.setVolume(id, m ? 0 : t.volume); return {...t, muted:m};
+    }));
+  };
+  const handleFX = (id, key, val) => {
+    setTracks(p => p.map(t => { if (t.id!==id) return t; const fx={...t.fx,[key]:val}; engineRef.current?.applyFX(id,fx); return {...t,fx}; }));
+  };
+  const handleFXToggle = (id) => setTracks(p => p.map(t => t.id===id ? {...t, showFx:!t.showFx} : t));
+  const handleRemove = (id) => {
+    engineRef.current?.removeTrackNodes(id);
+    setTracks(p => p.filter(t => t.id !== id));
+    if (playing) { engineRef.current?.stopAll(); setPlaying(false); }
+  };
+
+  const handleExport = async () => {
+    if (!tracks.length) { showToast('No tracks to export', 'error'); return; }
+    setExporting(true);
+    try {
+      const eng = ensureEngine();
+      const muted = new Set(tracks.filter(t=>t.muted).map(t=>t.id));
+      const fxMap = new Map(tracks.map(t=>[t.id,t.fx]));
+      const volMap = new Map(tracks.map(t=>[t.id,t.volume]));
+      const panMap = new Map(tracks.map(t=>[t.id,t.pan]));
+      const blob = await eng.exportWAV(tracks.map(t=>t.id), muted, fxMap, volMap, panMap);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = `beat-mix-${Date.now()}.wav`; a.click();
+      URL.revokeObjectURL(url); showToast('WAV downloaded!');
+    } catch (e) { showToast(`Export failed: ${e.message}`, 'error'); }
+    finally { setExporting(false); }
+  };
+
+  const loaded = tracks.filter(t => t.loaded).length;
+
+  return h('div', { style: { minHeight: '100vh', background: '#0a0b12', color: '#d0d8f0', fontFamily: "'Inter', system-ui, sans-serif", display: 'flex', flexDirection: 'column' } },
+    // ── Header ──
+    h('header', { style: { borderBottom: '1px solid #13151f', padding: '10px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'sticky', top: 0, zIndex: 20, background: '#0a0b12' } },
+      // Logo
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
+        h('svg', { viewBox: '0 0 32 32', fill: 'none', style: { width: 32, height: 32 } },
+          h('rect', { width: 32, height: 32, rx: 8, fill: '#00d4ff', fillOpacity: 0.12 }),
+          h('rect', { x: 4, y: 18, width: 4, height: 10, rx: 1.5, fill: '#00d4ff' }),
+          h('rect', { x: 10, y: 12, width: 4, height: 16, rx: 1.5, fill: '#00d4ff', fillOpacity: 0.75 }),
+          h('rect', { x: 16, y: 7, width: 4, height: 21, rx: 1.5, fill: '#00d4ff' }),
+          h('rect', { x: 22, y: 14, width: 4, height: 14, rx: 1.5, fill: '#00d4ff', fillOpacity: 0.75 }),
+        ),
+        h('div', null,
+          h('h1', { style: { margin: 0, fontSize: 14, fontWeight: 700, color: '#00d4ff', letterSpacing: '-0.01em' } }, 'Beat Mixer'),
+          h('p', { style: { margin: 0, fontSize: 9, color: '#3a3f55' } }, 'Beginner Studio')
+        )
+      ),
+      // Controls
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
+        // Master level
+        h('div', { style: { width: 80 } }, h(VUMeter, { level: masterLevel, color: '#00d4ff' })),
+        // Master vol
+        h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: masterVol, style: { ...sliderStyle, width: 70 },
+          onChange: e => { const v = parseFloat(e.target.value); setMasterVol(v); engineRef.current?.setMasterVolume(v); } }),
+        // Play/Stop
+        h('button', { onClick: togglePlay,
+          style: { display: 'flex', alignItems: 'center', gap: 6, padding: '8px 18px', borderRadius: 9, border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 13,
+            background: playing ? '#ff6b35' : '#00d4ff', color: playing ? '#fff' : '#0a0b12',
+            boxShadow: playing ? '0 0 14px rgba(255,107,53,0.4)' : '0 0 14px rgba(0,212,255,0.35)' } },
+          playing ? '■ Stop' : '▶ Play'),
+        // Export
+        h('button', { onClick: handleExport, disabled: exporting || !loaded,
+          style: { display: 'flex', alignItems: 'center', gap: 5, padding: '7px 14px', borderRadius: 8, border: '1px solid #1e2235', cursor: 'pointer',
+            background: 'none', color: '#5a6080', fontSize: 12, opacity: (!loaded || exporting) ? 0.4 : 1 } },
+          exporting ? '⏳ Rendering…' : '⬇ Export WAV'),
+        // Info
+        h('button', { onClick: () => setShowInfo(!showInfo),
+          style: { padding: '7px 10px', borderRadius: 8, border: '1px solid #1e2235', background: 'none', cursor: 'pointer', color: '#3a3f55', fontSize: 12 } }, 'ℹ'),
+      )
+    ),
+
+    // ── Info Banner ──
+    showInfo && h('div', { style: { background: '#0d0f18', borderBottom: '1px solid #13151f', padding: '10px 16px', fontSize: 11, color: '#5a6080', lineHeight: 1.6 } },
+      h('strong', { style: { color: '#00d4ff' } }, 'How it works: '),
+      'Add samples (demo kit, Freesound search, or upload WAV/MP3). Each track has Volume, Pan, EQ, Reverb, and Compression. ',
+      'Hit Play to loop all tracks together. Hit Export WAV to download your mix. The audio engine is 100% in-browser (Web Audio API).'
+    ),
+
+    // ── Body ──
+    h('div', { style: { display: 'flex', flex: 1, overflow: 'hidden' } },
+      // Sidebar
+      h('div', { style: { width: 230, borderRight: '1px solid #13151f', display: 'flex', flexDirection: 'column', overflowY: 'auto', flexShrink: 0 } },
+        h('div', { style: { padding: '12px 12px 6px' } },
+          h('p', { style: { fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#3a3f55', fontWeight: 700, marginBottom: 10 } }, 'Add Samples'),
+          // Demo
+          h('button', { onClick: loadDemos, disabled: loaded >= 6,
+            style: { ...sideBtn, marginBottom: 6 } }, '⚡ Load Demo Samples'),
+          // Upload
+          h('button', { onClick: () => fileInputRef.current?.click(), disabled: loaded >= 6,
+            style: { ...sideBtn, marginBottom: 6 } }, '📁 Upload WAV / MP3'),
+          h('input', { ref: fileInputRef, type: 'file', accept: 'audio/*', multiple: true, style: { display: 'none' },
+            onChange: e => handleFiles(e.target.files) }),
+          // Freesound toggle
+          h('button', { onClick: () => setShowBrowser(!showBrowser),
+            style: { ...sideBtn, marginBottom: 6, border: `1px solid ${showBrowser ? '#00d4ff' : '#1e2235'}`, color: showBrowser ? '#00d4ff' : '#5a6080', background: showBrowser ? 'rgba(0,212,255,0.05)' : 'none' } },
+            '🔍 Freesound Browser ', showBrowser ? '▲' : '▼'),
+        ),
+        showBrowser && h('div', { style: { padding: '8px 12px', borderTop: '1px solid #13151f' } },
+          h(FreesoundBrowser, { apiKey: fsKey, onKeyChange: setFsKey, onLoad: handleFsLoad, loading: loadingFs })
+        ),
+        h('div', { style: { marginTop: 'auto', padding: '10px 12px', borderTop: '1px solid #13151f', fontSize: 9, color: '#2a2d3e' } },
+          `${loaded}/6 tracks · Web Audio API · 44.1 kHz`)
+      ),
+
+      // Main mixer
+      h('div', { style: { flex: 1, overflowY: 'auto', padding: 16 } },
+        tracks.length === 0
+          ? h('div', { style: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', minHeight: 280, gap: 16 } },
+              h('div', { style: { width: 64, height: 64, borderRadius: 16, background: '#13151f', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28 } }, '🎛️'),
+              h('div', { style: { textAlign: 'center' } },
+                h('p', { style: { fontSize: 14, fontWeight: 600, color: '#4a5080', margin: '0 0 4px' } }, 'No tracks yet'),
+                h('p', { style: { fontSize: 12, color: '#3a3f55' } }, 'Click "Load Demo Samples" to start instantly')
+              ),
+              h('button', { onClick: loadDemos,
+                style: { display: 'flex', alignItems: 'center', gap: 8, padding: '10px 24px', borderRadius: 12, border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 14, background: '#00d4ff', color: '#0a0b12', boxShadow: '0 0 18px rgba(0,212,255,0.35)' } },
+                '⚡ Load Demo Samples')
+            )
+          : h('div', null,
+              tracks.map(track =>
+                h(TrackLane, { key: track.id, track, playing, level: levels[track.id] || 0,
+                  onVol: handleVol, onPan: handlePan, onMute: handleMute,
+                  onFX: handleFX, onFXToggle: handleFXToggle, onRemove: handleRemove })
+              ),
+              loaded < 6 && h('button', { onClick: () => fileInputRef.current?.click(),
+                style: { width: '100%', padding: '10px', borderRadius: 10, border: '1px dashed #1e2235', background: 'none', cursor: 'pointer', color: '#3a3f55', fontSize: 12, marginTop: 6,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 } },
+                '+ Add another track')
+            )
+      )
+    ),
+
+    // Status bar
+    h('div', { style: { borderTop: '1px solid #0d0f18', padding: '5px 16px', display: 'flex', alignItems: 'center', gap: 16, fontSize: 9, color: '#2a2d3e' } },
+      h('span', { style: { color: playing ? '#ff6b35' : '#2a2d3e', display: 'flex', alignItems: 'center', gap: 5 } },
+        playing && h('span', { style: { width: 6, height: 6, borderRadius: '50%', background: '#ff6b35', display: 'inline-block', animation: 'pulse 1.2s infinite' } }),
+        playing ? 'Playing' : 'Stopped'),
+      h('span', null, `${loaded} track${loaded!==1?'s':''}`),
+      h('span', { style: { marginLeft: 'auto' } }, 'Web Audio API · 44.1kHz · Stereo')
+    ),
+
+    // Toast
+    toast && h('div', { style: { position: 'fixed', bottom: 24, right: 24, padding: '10px 16px', borderRadius: 10, background: toast.type==='error' ? '#ff6b35' : '#00d4ff',
+      color: toast.type==='error' ? '#fff' : '#0a0b12', fontSize: 12, fontWeight: 600, boxShadow: '0 4px 20px rgba(0,0,0,0.5)', zIndex: 100 } }, toast.msg)
+  );
+}
+
+const sideBtn = { width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid #1e2235', background: 'none', cursor: 'pointer', color: '#5a6080', fontSize: 11, textAlign: 'left', transition: 'color 0.15s', display: 'block', boxSizing: 'border-box' };
+
+ReactDOM.createRoot(document.getElementById('root')).render(h(App, null));
+
+  </script>
+</body>
+</html>
